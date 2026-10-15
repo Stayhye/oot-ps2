@@ -1,0 +1,94 @@
+name: Build OoT PS2 Port (Local Assets)
+
+on:
+  push:
+    branches: [ "main", "master", "dev/**" ]
+  pull_request:
+    branches: [ "main", "master" ]
+
+jobs:
+  build-ps2-local:
+    runs-on: ubuntu-latest
+    
+    container:
+      image: ps2dev/ps2dev:latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install System Dependencies
+        run: |
+          apt-get update && apt-get install -y --no-install-recommends \
+            python3 \
+            python3-pip \
+            python3-venv \
+            python3-dev \
+            make \
+            git \
+            build-essential \
+            binutils \
+            wget \
+            unzip
+
+      - name: Checkout Upstream zeldaret/oot
+        uses: actions/checkout@v4
+        with:
+          repository: zeldaret/oot
+          ref: 1bef952ff61a6dd1945c7887c1babd94efe95f72
+          path: oot-upstream
+
+      - name: Setup Upstream Python Environment & Dependencies
+        run: |
+          cd oot-upstream
+          python3 -m venv .venv
+          ./.venv/bin/python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then
+            ./.venv/bin/python -m pip install -r requirements.txt
+          fi
+
+      - name: Setup Baserom
+        env:
+          ROM_BASE64: ${{ secrets.ROM_NTSC_1_2_BASE64 }}
+        run: |
+          mkdir -p oot-upstream/baseroms/ntsc-1.2
+          if [ -n "$ROM_BASE64" ]; then
+            echo "$ROM_BASE64" | base64 -d > oot-upstream/baseroms/ntsc-1.2/baserom.z64
+            # Verify ROM SHA1
+            echo "be41b3bdc48d98c48529219919015a1af22f5057c2  oot-upstream/baseroms/ntsc-1.2/baserom.z64" | sha1sum -c -
+          else
+            echo "WARNING: ROM_NTSC_1_2_BASE64 secret is missing. Make sure your baserom is provided if building from a private repo."
+          fi
+
+      - name: Extract/Setup Upstream Assets
+        run: |
+          cd oot-upstream
+          # Run make setup using the upstream virtual environment python
+          make setup VERSION=ntsc-1.2 PYTHON=.venv/bin/python || echo "Setup completed or requires manual baserom check"
+
+      - name: Set Environment Variables & Build OoT PS2
+        env:
+          PS2DEV: /usr/local/ps2dev
+          OOT_UPSTREAM: ${{ github.workspace }}/oot-upstream
+        run: |
+          # Source custom environment if available
+          if [ -f tools/ps2_env.sh ]; then
+            source tools/ps2_env.sh
+          fi
+
+          python3 tools/prepare_ps2_includes.py --output build/PS2-ntsc12/generated
+
+          bash tools/build_ps2.sh OOT_VERSION=NTSC_1_2 BUILD_DIR=build/PS2-ntsc12 \
+            OOT_UPSTREAM="$OOT_UPSTREAM" TARGET=oot_ps2.elf -j2
+
+          "$OOT_UPSTREAM/.venv/bin/python" tools/prepare_ps2_rom.py \
+            --upstream "$OOT_UPSTREAM" --profile full --output build/PS2-ntsc12/oot.z64
+
+      - name: Archive Build Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: oot-ps2-local-build
+          path: |
+            build/PS2-ntsc12/oot_ps2.elf
+            build/PS2-ntsc12/oot.z64
+            build/PS2-ntsc12/oot.map
